@@ -18,6 +18,7 @@ func newServiceClient(settings *internet.MemoryStreamConfig, timeout time.Durati
 		socketSettings = settings.SocketSettings
 		if config := coretls.ConfigFromStreamSettings(settings); config != nil {
 			tlsConfig = config.GetTLSConfig(coretls.WithNextProto("http/1.1"))
+			tlsConfig.ServerName = ""
 		}
 	}
 	if len(tlsConfig.NextProtos) == 0 {

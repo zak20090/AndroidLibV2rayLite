@@ -69,7 +69,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	if err := storage.Put(ctx, announceName(session, time.Now()), nil); err != nil {
 		return nil, errors.New("failed to announce xdrive session").Base(err)
 	}
-	return newConn(ctx, storage, uplinkPrefix(session), downlinkPrefix(session), paramsFromConfig(config), nil), nil
+	return newConn(context.Background(), storage, uplinkPrefix(session), downlinkPrefix(session), paramsFromConfig(config), func() {
+		storage.Close()
+	}), nil
 }
 
 func uplinkPrefix(session string) string {

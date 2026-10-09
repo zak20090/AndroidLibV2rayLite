@@ -2,10 +2,6 @@ package xdrive
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
-	"sync"
 
 	"github.com/v2fly/v2ray-core/v5/transport/internet"
 )
@@ -23,12 +19,10 @@ type Storage interface {
 	Close() error
 }
 
-var (
-	storageMu sync.Mutex
-	storages  = make(map[string]Storage)
-)
-
 func newStorage(settings *internet.MemoryStreamConfig) (Storage, error) {
+	if settings == nil {
+		return nil, errInvalidConfig
+	}
 	config, ok := settings.ProtocolSettings.(*Config)
 	if !ok || config == nil {
 		return nil, errInvalidConfig
@@ -36,19 +30,5 @@ func newStorage(settings *internet.MemoryStreamConfig) (Storage, error) {
 	if config.Service != "S3" {
 		return nil, errUnsupportedService
 	}
-	keyParts := append([]string{config.RemoteFolder}, config.Secrets...)
-	sum := sha256.Sum256([]byte(strings.Join(keyParts, "\x00")))
-	key := hex.EncodeToString(sum[:])
-
-	storageMu.Lock()
-	defer storageMu.Unlock()
-	if storage, ok := storages[key]; ok {
-		return storage, nil
-	}
-	storage, err := newS3Storage(settings, config)
-	if err != nil {
-		return nil, err
-	}
-	storages[key] = storage
-	return storage, nil
+	return newS3Storage(settings, config)
 }

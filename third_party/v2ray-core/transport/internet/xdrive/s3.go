@@ -293,4 +293,9 @@ func (s *s3Storage) Delete(ctx context.Context, name string) error {
 	}
 	return s.deleteKey(ctx, key)
 }
-func (s *s3Storage) Close() error { return nil }
+func (s *s3Storage) Close() error {
+	if transport, ok := s.client.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
+	return nil
+}
