@@ -69,6 +69,7 @@ import (
 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/tls/utls"
 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/udp"
 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/websocket"
+	_ "github.com/v2fly/v2ray-core/v5/transport/internet/xdrive"
 
 	// Developer preview transports
 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/request/assembly"

@@ -21,6 +21,7 @@ import (
 	"github.com/v2fly/v2ray-core/v5/transport/internet/quic"
 	"github.com/v2fly/v2ray-core/v5/transport/internet/tcp"
 	"github.com/v2fly/v2ray-core/v5/transport/internet/websocket"
+	"github.com/v2fly/v2ray-core/v5/transport/internet/xdrive"
 )
 
 var (
@@ -309,6 +310,8 @@ func (p TransportProtocol) Build() (string, error) {
 		return "gun", nil
 	case "hy2", "hysteria2":
 		return "hysteria2", nil
+	case "xdrive":
+		return "xdrive", nil
 	default:
 		return "", newError("Config: unknown transport protocol: ", p)
 	}
@@ -327,7 +330,45 @@ type StreamConfig struct {
 	GunSettings    *GunConfig              `json:"gunSettings"`
 	GRPCSettings   *GunConfig              `json:"grpcSettings"`
 	Hy2Settings    *Hy2Config              `json:"hy2Settings"`
+	XdriveSettings *XdriveConfig           `json:"xdriveSettings"`
 	SocketSettings *socketcfg.SocketConfig `json:"sockopt"`
+}
+
+type XdriveConfig struct {
+	RemoteFolder      string   `json:"remoteFolder"`
+	Service           string   `json:"service"`
+	Secrets           []string `json:"secrets"`
+	SegmentBytes      uint32   `json:"segmentBytes"`
+	FlushIntervalMs   uint32   `json:"flushIntervalMs"`
+	PollIntervalMs    uint32   `json:"pollIntervalMs"`
+	MaxPollIntervalMs uint32   `json:"maxPollIntervalMs"`
+	SessionTtlSeconds uint32   `json:"sessionTtlSeconds"`
+	Concurrency       uint32   `json:"concurrency"`
+	EagerWindowMs     uint32   `json:"eagerWindowMs"`
+	HoleTimeoutMs     uint32   `json:"holeTimeoutMs"`
+}
+
+func (c *XdriveConfig) Build() (*xdrive.Config, error) {
+	if c == nil {
+		return nil, newError("xdrive requires xdriveSettings")
+	}
+	config := &xdrive.Config{
+		RemoteFolder:      c.RemoteFolder,
+		Service:           c.Service,
+		Secrets:           c.Secrets,
+		SegmentBytes:      c.SegmentBytes,
+		FlushIntervalMs:   c.FlushIntervalMs,
+		PollIntervalMs:    c.PollIntervalMs,
+		MaxPollIntervalMs: c.MaxPollIntervalMs,
+		SessionTtlSeconds: c.SessionTtlSeconds,
+		Concurrency:       c.Concurrency,
+		EagerWindowMs:     c.EagerWindowMs,
+		HoleTimeoutMs:     c.HoleTimeoutMs,
+	}
+	if err := config.Validate(); err != nil {
+		return nil, newError("invalid xdrive settings").Base(err)
+	}
+	return config, nil
 }
 
 // Build implements Buildable.
@@ -436,6 +477,16 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
 			ProtocolName: "hysteria2",
 			Settings:     serial.ToTypedMessage(hy2),
+		})
+	}
+	if config.ProtocolName == "xdrive" {
+		xs, err := c.XdriveSettings.Build()
+		if err != nil {
+			return nil, err
+		}
+		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
+			ProtocolName: "xdrive",
+			Settings:     serial.ToTypedMessage(xs),
 		})
 	}
 	if c.SocketSettings != nil {

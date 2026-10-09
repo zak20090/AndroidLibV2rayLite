@@ -21,7 +21,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/v2fly/v2ray-core/v5/transport/internet"
 )
 
 const s3BodyLimit = 20 << 20
@@ -47,28 +47,39 @@ var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 var folderPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/?$`)
 
 func newS3Storage(settings *internet.MemoryStreamConfig, config *Config) (*s3Storage, error) {
+	c, u, prefix, err := parseS3Credentials(config)
+	if err != nil {
+		return nil, err
+	}
+	client := newServiceClient(settings, 25*time.Second, 8)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &s3Storage{c, u, prefix, client, v4.NewSigner()}, nil
+}
+
+func validateS3Credentials(config *Config) error {
+	_, _, _, err := parseS3Credentials(config)
+	return err
+}
+
+func parseS3Credentials(config *Config) (s3Credentials, *url.URL, string, error) {
 	if len(config.Secrets) != 1 {
-		return nil, errors.New("S3 requires one credentials JSON")
+		return s3Credentials{}, nil, "", errors.New("S3 requires one credentials JSON")
 	}
 	var c s3Credentials
 	if json.Unmarshal([]byte(config.Secrets[0]), &c) != nil {
-		return nil, errors.New("invalid S3 credentials JSON")
+		return s3Credentials{}, nil, "", errors.New("invalid S3 credentials JSON")
 	}
 	u, err := url.Parse(c.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return nil, errors.New("S3 endpoint must be an HTTPS origin without credentials, path or query")
+		return s3Credentials{}, nil, "", errors.New("S3 endpoint must be an HTTPS origin without credentials, path or query")
 	}
 	if !bucketPattern.MatchString(c.Bucket) || c.Region == "" || c.AccessKey == "" || c.SecretKey == "" {
-		return nil, errors.New("S3 bucket, region and scoped credentials are required")
+		return s3Credentials{}, nil, "", errors.New("S3 bucket, region and scoped credentials are required")
 	}
 	if !folderPattern.MatchString(config.RemoteFolder) {
-		return nil, errors.New("S3 requires a nonempty isolated prefix")
+		return s3Credentials{}, nil, "", errors.New("S3 requires a nonempty isolated prefix")
 	}
-	client := newServiceClient(settings, 25*time.Second, 8)
-	// Never leak a signature/credentials to a redirected host or bypass Android's
-	// protected endpoint mapping. Region/endpoint mistakes must fail closed.
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &s3Storage{c, u, strings.Trim(config.RemoteFolder, "/") + "/", client, v4.NewSigner()}, nil
+	return c, u, strings.Trim(config.RemoteFolder, "/") + "/", nil
 }
 
 func safeS3Name(name string) bool {

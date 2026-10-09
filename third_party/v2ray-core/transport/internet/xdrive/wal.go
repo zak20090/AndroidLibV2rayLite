@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xtls/xray-core/common/errors"
+	"github.com/v2fly/v2ray-core/v5/common/errors"
 )
 
 const (
@@ -132,6 +132,13 @@ func (w *walWriter) flushLocked() error {
 		return w.err
 	}
 
+	select {
+	case w.sem <- struct{}{}:
+	case <-w.ctx.Done():
+		w.err = w.ctx.Err()
+		return w.err
+	}
+
 	n := len(w.buf)
 	if n > w.segmentBytes {
 		n = w.segmentBytes
@@ -158,14 +165,9 @@ func (w *walWriter) flushLocked() error {
 func (w *walWriter) upload(seq int64, chunk []byte) {
 	defer w.wg.Done()
 
-	select {
-	case w.sem <- struct{}{}:
-	case <-w.ctx.Done():
-		return
-	}
-	defer func() { <-w.sem }()
-
-	if err := w.storage.Put(w.ctx, objectName(w.prefix, seq, segSuffix), chunk); err != nil {
+	err := w.storage.Put(w.ctx, objectName(w.prefix, seq, segSuffix), chunk)
+	<-w.sem
+	if err != nil {
 		w.mu.Lock()
 		if w.err == nil {
 			w.err = errors.New("failed to store segment").Base(err)
