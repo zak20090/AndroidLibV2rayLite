@@ -2,6 +2,8 @@ module github.com/2dust/AndroidLibV2rayLite
 
 go 1.26.3
 
+replace github.com/v2fly/v2ray-core/v5 => ./third_party/v2ray-core
+
 require (
 	github.com/v2fly/v2ray-core/v5 v5.51.2
 	golang.org/x/mobile v0.0.0-20260217195705-b56b3793a9c4
@@ -12,6 +14,8 @@ require (
 	github.com/aead/cmac v0.0.0-20160719120800-7af84192f0b1 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22 // indirect
+	github.com/aws/aws-sdk-go-v2 v1.36.3 // indirect
+	github.com/aws/smithy-go v1.22.2 // indirect
 	github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
