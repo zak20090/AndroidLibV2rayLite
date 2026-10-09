@@ -7,6 +7,7 @@ toolchain go1.26.1
 require (
 	github.com/adrg/xdg v0.5.3
 	github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22
+	github.com/aws/aws-sdk-go-v2 v0.18.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-chi/render v1.0.3
 	github.com/go-playground/validator/v10 v10.30.2
@@ -75,6 +76,7 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.1 // indirect
+	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/klauspost/reedsolomon v1.11.7 // indirect
