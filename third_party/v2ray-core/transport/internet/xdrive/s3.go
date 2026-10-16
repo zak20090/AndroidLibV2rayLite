@@ -6,6 +6,7 @@ package xdrive
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,16 +17,18 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/v2fly/v2ray-core/v5/transport/internet"
 )
 
-const s3BodyLimit = 20 << 20
-const s3MaxEntries = 10000
+const (
+	s3BodyLimit = 20 << 20
+	s3MaxEntries = 10000
+	s3Attempts   = 4
+)
 
 // Secrets[0] is JSON to avoid adding fields to upstream's protobuf schema.
 type s3Credentials struct {
@@ -40,7 +43,6 @@ type s3Storage struct {
 	endpoint    *url.URL
 	prefix      string
 	client      *http.Client
-	signer      *v4.Signer
 }
 
 var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
@@ -53,7 +55,7 @@ func newS3Storage(settings *internet.MemoryStreamConfig, config *Config) (*s3Sto
 	}
 	client := newServiceClient(settings, 25*time.Second, 8)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &s3Storage{c, u, prefix, client, v4.NewSigner()}, nil
+	return &s3Storage{c, u, prefix, client}, nil
 }
 
 func validateS3Credentials(config *Config) error {
@@ -94,19 +96,72 @@ func safeS3Name(name string) bool {
 	return true
 }
 
+func s3Escape(value string, keepSlash bool) string {
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '_' || c == '.' || c == '~' || keepSlash && c == '/' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+func s3CanonicalQuery(query url.Values) string {
+	pairs := make([]string, 0, len(query))
+	for key, values := range query {
+		for _, value := range values {
+			pairs = append(pairs, s3Escape(key, false)+"="+s3Escape(value, false))
+		}
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, "&")
+}
+
+func s3HMACSHA256(key []byte, message string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(message))
+	return mac.Sum(nil)
+}
+
+func s3Authorize(method, host, path, query, payloadHash, accessKey, secretKey, region string, now time.Time) (string, string) {
+	stamp := now.UTC().Format("20060102T150405Z")
+	day := stamp[:8]
+	const signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+	headers := "host:" + host + "\nx-amz-content-sha256:" + payloadHash + "\nx-amz-date:" + stamp + "\n"
+	canonicalRequest := strings.Join([]string{method, path, query, headers, signedHeaders, payloadHash}, "\n")
+	scope := day + "/" + region + "/s3/aws4_request"
+	canonicalHash := sha256.Sum256([]byte(canonicalRequest))
+	stringToSign := "AWS4-HMAC-SHA256\n" + stamp + "\n" + scope + "\n" + hex.EncodeToString(canonicalHash[:])
+	signingKey := s3HMACSHA256([]byte("AWS4"+secretKey), day)
+	signingKey = s3HMACSHA256(signingKey, region)
+	signingKey = s3HMACSHA256(signingKey, "s3")
+	signingKey = s3HMACSHA256(signingKey, "aws4_request")
+	signature := hex.EncodeToString(s3HMACSHA256(signingKey, stringToSign))
+	authorization := "AWS4-HMAC-SHA256 Credential=" + accessKey + "/" + scope +
+		", SignedHeaders=" + signedHeaders + ", Signature=" + signature
+	return stamp, authorization
+}
+
 func (s *s3Storage) request(ctx context.Context, method, key string, query url.Values, data []byte) (int, []byte, error) {
 	if len(data) > s3BodyLimit {
 		return 0, nil, errors.New("S3 segment too large")
 	}
-	u := *s.endpoint
-	u.Path = "/" + s.credentials.Bucket
+	path := "/" + s.credentials.Bucket
 	if key != "" {
-		u.Path += "/" + key
+		path += "/" + s3Escape(key, true)
 	}
-	u.RawQuery = query.Encode()
+	canonicalQuery := s3CanonicalQuery(query)
+	requestURL := s.endpoint.Scheme + "://" + s.endpoint.Host + path
+	if canonicalQuery != "" {
+		requestURL += "?" + canonicalQuery
+	}
 	digest := sha256.Sum256(data)
 	hash := hex.EncodeToString(digest[:])
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < s3Attempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -114,21 +169,21 @@ func (s *s3Storage) request(ctx context.Context, method, key string, query url.V
 			case <-time.After(time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond):
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(data))
 		if err != nil {
 			return 0, nil, errors.New("invalid S3 request")
 		}
+		stamp, authorization := s3Authorize(method, req.URL.Host, path, canonicalQuery, hash,
+			s.credentials.AccessKey, s.credentials.SecretKey, s.credentials.Region, time.Now())
+		req.Header.Set("X-Amz-Date", stamp)
 		req.Header.Set("X-Amz-Content-Sha256", hash)
-		err = s.signer.SignHTTP(ctx, aws.Credentials{AccessKeyID: s.credentials.AccessKey, SecretAccessKey: s.credentials.SecretKey}, req, hash, "s3", s.credentials.Region, time.Now().UTC(), func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true })
-		if err != nil {
-			return 0, nil, errors.New("S3 signing failed")
-		}
+		req.Header.Set("Authorization", authorization)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0, nil, ctx.Err()
 			}
-			if attempt < 3 {
+			if attempt < s3Attempts-1 {
 				continue
 			}
 			return 0, nil, errors.New("S3 network or certificate error")
@@ -141,7 +196,7 @@ func (s *s3Storage) request(ctx context.Context, method, key string, query url.V
 		if len(body) > s3BodyLimit {
 			return 0, nil, errors.New("S3 response exceeds safety limit")
 		}
-		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < 3 {
+		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < s3Attempts-1 {
 			continue
 		}
 		return resp.StatusCode, body, nil
