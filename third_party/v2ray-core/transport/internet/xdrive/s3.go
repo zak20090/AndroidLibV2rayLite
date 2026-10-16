@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	s3BodyLimit = 20 << 20
+	s3BodyLimit  = 20 << 20
 	s3MaxEntries = 10000
 	s3Attempts   = 4
 )
