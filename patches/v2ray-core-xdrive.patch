@@ -1,0 +1,1892 @@
+diff --git a/infra/conf/v4/transport_internet.go b/infra/conf/v4/transport_internet.go
+index 9a47f2a..5064ed3 100644
+--- a/infra/conf/v4/transport_internet.go
++++ b/infra/conf/v4/transport_internet.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/v2fly/v2ray-core/v5/transport/internet/quic"
+ 	"github.com/v2fly/v2ray-core/v5/transport/internet/tcp"
+ 	"github.com/v2fly/v2ray-core/v5/transport/internet/websocket"
++	"github.com/v2fly/v2ray-core/v5/transport/internet/xdrive"
+ )
+ 
+ var (
+@@ -309,6 +310,8 @@ func (p TransportProtocol) Build() (string, error) {
+ 		return "gun", nil
+ 	case "hy2", "hysteria2":
+ 		return "hysteria2", nil
++	case "xdrive":
++		return "xdrive", nil
+ 	default:
+ 		return "", newError("Config: unknown transport protocol: ", p)
+ 	}
+@@ -327,9 +330,47 @@ type StreamConfig struct {
+ 	GunSettings    *GunConfig              `json:"gunSettings"`
+ 	GRPCSettings   *GunConfig              `json:"grpcSettings"`
+ 	Hy2Settings    *Hy2Config              `json:"hy2Settings"`
++	XdriveSettings *XdriveConfig           `json:"xdriveSettings"`
+ 	SocketSettings *socketcfg.SocketConfig `json:"sockopt"`
+ }
+ 
++type XdriveConfig struct {
++	RemoteFolder      string   `json:"remoteFolder"`
++	Service           string   `json:"service"`
++	Secrets           []string `json:"secrets"`
++	SegmentBytes      uint32   `json:"segmentBytes"`
++	FlushIntervalMs   uint32   `json:"flushIntervalMs"`
++	PollIntervalMs    uint32   `json:"pollIntervalMs"`
++	MaxPollIntervalMs uint32   `json:"maxPollIntervalMs"`
++	SessionTtlSeconds uint32   `json:"sessionTtlSeconds"`
++	Concurrency       uint32   `json:"concurrency"`
++	EagerWindowMs     uint32   `json:"eagerWindowMs"`
++	HoleTimeoutMs     uint32   `json:"holeTimeoutMs"`
++}
++
++func (c *XdriveConfig) Build() (*xdrive.Config, error) {
++	if c == nil {
++		return nil, newError("xdrive requires xdriveSettings")
++	}
++	config := &xdrive.Config{
++		RemoteFolder:      c.RemoteFolder,
++		Service:           c.Service,
++		Secrets:           c.Secrets,
++		SegmentBytes:      c.SegmentBytes,
++		FlushIntervalMs:   c.FlushIntervalMs,
++		PollIntervalMs:    c.PollIntervalMs,
++		MaxPollIntervalMs: c.MaxPollIntervalMs,
++		SessionTtlSeconds: c.SessionTtlSeconds,
++		Concurrency:       c.Concurrency,
++		EagerWindowMs:     c.EagerWindowMs,
++		HoleTimeoutMs:     c.HoleTimeoutMs,
++	}
++	if err := config.Validate(); err != nil {
++		return nil, newError("invalid xdrive settings").Base(err)
++	}
++	return config, nil
++}
++
+ // Build implements Buildable.
+ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
+ 	config := &internet.StreamConfig{
+@@ -438,6 +479,16 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
+ 			Settings:     serial.ToTypedMessage(hy2),
+ 		})
+ 	}
++	if config.ProtocolName == "xdrive" {
++		xs, err := c.XdriveSettings.Build()
++		if err != nil {
++			return nil, err
++		}
++		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
++			ProtocolName: "xdrive",
++			Settings:     serial.ToTypedMessage(xs),
++		})
++	}
+ 	if c.SocketSettings != nil {
+ 		ss, err := c.SocketSettings.Build()
+ 		if err != nil {
+diff --git a/infra/conf/v4/xdrive_test.go b/infra/conf/v4/xdrive_test.go
+new file mode 100644
+index 0000000..3c0b002
+--- /dev/null
++++ b/infra/conf/v4/xdrive_test.go
+@@ -0,0 +1,67 @@
++package v4
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++	"github.com/v2fly/v2ray-core/v5/transport/internet/xdrive"
++)
++
++func TestXdriveStreamConfigBuild(t *testing.T) {
++	var config StreamConfig
++	err := json.Unmarshal([]byte(`{
++		"network":"xdrive",
++		"security":"none",
++		"xdriveSettings":{
++			"service":"S3",
++			"remoteFolder":"private/device",
++			"secrets":["{\"endpoint\":\"https://s3.example.test\",\"region\":\"ru-msk\",\"bucket\":\"test-bucket\",\"accessKey\":\"test\",\"secretKey\":\"test\"}"],
++			"segmentBytes":262144,
++			"concurrency":4
++		}
++	}`), &config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stream, err := config.Build()
++	if err != nil {
++		t.Fatal(err)
++	}
++	settings, err := internet.ToMemoryStreamConfig(stream)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, ok := settings.ProtocolSettings.(*xdrive.Config)
++	if !ok {
++		t.Fatalf("transport settings type = %T, want *xdrive.Config", settings.ProtocolSettings)
++	}
++	if settings.ProtocolName != "xdrive" || got.Service != "S3" || got.RemoteFolder != "private/device" ||
++		got.SegmentBytes != 262144 || got.Concurrency != 4 {
++		t.Fatalf("unexpected xdrive transport settings: %#v / %#v", settings, got)
++	}
++}
++
++func TestXdriveRequiresCredentials(t *testing.T) {
++	var config StreamConfig
++	if err := json.Unmarshal([]byte(`{"network":"xdrive","xdriveSettings":{"service":"S3","remoteFolder":"private/device"}}`), &config); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := config.Build(); err == nil {
++		t.Fatal("expected xdrive credential validation failure")
++	}
++}
++
++func TestExistingTCPStreamConfigStillBuilds(t *testing.T) {
++	var config StreamConfig
++	if err := json.Unmarshal([]byte(`{"network":"tcp","tcpSettings":{"acceptProxyProtocol":true}}`), &config); err != nil {
++		t.Fatal(err)
++	}
++	stream, err := config.Build()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stream.GetEffectiveProtocol() != "tcp" {
++		t.Fatalf("protocol = %q, want tcp", stream.GetEffectiveProtocol())
++	}
++}
+diff --git a/main/distro/all/all.go b/main/distro/all/all.go
+index 459fda9..ae42879 100644
+--- a/main/distro/all/all.go
++++ b/main/distro/all/all.go
+@@ -69,6 +69,7 @@ import (
+ 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/tls/utls"
+ 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/udp"
+ 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/websocket"
++	_ "github.com/v2fly/v2ray-core/v5/transport/internet/xdrive"
+ 
+ 	// Developer preview transports
+ 	_ "github.com/v2fly/v2ray-core/v5/transport/internet/request/assembly"
+diff --git a/transport/internet/xdrive/client.go b/transport/internet/xdrive/client.go
+new file mode 100644
+index 0000000..eefbb3b
+--- /dev/null
++++ b/transport/internet/xdrive/client.go
+@@ -0,0 +1,90 @@
++package xdrive
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/common"
++	"github.com/v2fly/v2ray-core/v5/common/errors"
++	"github.com/v2fly/v2ray-core/v5/common/net"
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++)
++
++const (
++	protocolName = "xdrive"
++	sessionsDir  = "sessions"
++	streamsDir   = "streams"
++	uplinkDir    = "c2s"
++	downlinkDir  = "s2c"
++)
++
++var errNotFound = errors.New("object not found")
++var errInvalidConfig = errors.New("invalid xdrive settings")
++var errUnsupportedService = errors.New("unsupported xdrive storage service")
++
++func init() {
++	common.Must(internet.RegisterProtocolConfigCreator(protocolName, func() interface{} {
++		return new(Config)
++	}))
++	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
++}
++
++func newSessionID() (string, error) {
++	buf := make([]byte, 16)
++	if _, err := rand.Read(buf); err != nil {
++		return "", errors.New("failed to generate session id").Base(err)
++	}
++	return hex.EncodeToString(buf), nil
++}
++
++func announceName(session string, at time.Time) string {
++	return sessionsDir + "/" + strconv.FormatInt(at.UnixNano(), 10) + "-" + session
++}
++
++func streamConfig(streamSettings *internet.MemoryStreamConfig) (*Config, error) {
++	config, ok := streamSettings.ProtocolSettings.(*Config)
++	if !ok || config == nil {
++		return nil, errors.New("invalid xdrive protocol settings")
++	}
++	return config, nil
++}
++
++func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (internet.Connection, error) {
++	config, err := streamConfig(streamSettings)
++	if err != nil {
++		return nil, err
++	}
++	storage, err := newStorage(streamSettings)
++	if err != nil {
++		return nil, err
++	}
++	session, err := newSessionID()
++	if err != nil {
++		return nil, err
++	}
++	if err := storage.Put(ctx, announceName(session, time.Now()), nil); err != nil {
++		return nil, errors.New("failed to announce xdrive session").Base(err)
++	}
++	return newConn(context.Background(), storage, uplinkPrefix(session), downlinkPrefix(session), paramsFromConfig(config), func() {
++		storage.Close()
++	}), nil
++}
++
++func uplinkPrefix(session string) string {
++	return streamsDir + "/" + session + "/" + uplinkDir
++}
++
++func downlinkPrefix(session string) string {
++	return streamsDir + "/" + session + "/" + downlinkDir
++}
++
++func (c *Config) Validate() error {
++	if c == nil || c.Service != "S3" || len(c.Secrets) != 1 || strings.Trim(c.RemoteFolder, "/") == "" {
++		return errInvalidConfig
++	}
++	return validateS3Credentials(c)
++}
+diff --git a/transport/internet/xdrive/config.pb.go b/transport/internet/xdrive/config.pb.go
+new file mode 100644
+index 0000000..997ad1f
+--- /dev/null
++++ b/transport/internet/xdrive/config.pb.go
+@@ -0,0 +1,213 @@
++// Code generated by protoc-gen-go. DO NOT EDIT.
++// versions:
++// 	protoc-gen-go v1.36.11
++// 	protoc        v5.29.3
++// source: transport/internet/xdrive/config.proto
++
++package xdrive
++
++import (
++	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
++	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
++	reflect "reflect"
++	sync "sync"
++	unsafe "unsafe"
++)
++
++const (
++	// Verify that this generated code is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
++	// Verify that runtime/protoimpl is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
++)
++
++type Config struct {
++	state             protoimpl.MessageState `protogen:"open.v1"`
++	RemoteFolder      string                 `protobuf:"bytes,1,opt,name=remote_folder,json=remoteFolder,proto3" json:"remote_folder,omitempty"`
++	Service           string                 `protobuf:"bytes,2,opt,name=service,proto3" json:"service,omitempty"`
++	Secrets           []string               `protobuf:"bytes,3,rep,name=secrets,proto3" json:"secrets,omitempty"`
++	SegmentBytes      uint32                 `protobuf:"varint,4,opt,name=segment_bytes,json=segmentBytes,proto3" json:"segment_bytes,omitempty"`
++	FlushIntervalMs   uint32                 `protobuf:"varint,5,opt,name=flush_interval_ms,json=flushIntervalMs,proto3" json:"flush_interval_ms,omitempty"`
++	PollIntervalMs    uint32                 `protobuf:"varint,6,opt,name=poll_interval_ms,json=pollIntervalMs,proto3" json:"poll_interval_ms,omitempty"`
++	MaxPollIntervalMs uint32                 `protobuf:"varint,7,opt,name=max_poll_interval_ms,json=maxPollIntervalMs,proto3" json:"max_poll_interval_ms,omitempty"`
++	SessionTtlSeconds uint32                 `protobuf:"varint,8,opt,name=session_ttl_seconds,json=sessionTtlSeconds,proto3" json:"session_ttl_seconds,omitempty"`
++	Concurrency       uint32                 `protobuf:"varint,9,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
++	EagerWindowMs     uint32                 `protobuf:"varint,10,opt,name=eager_window_ms,json=eagerWindowMs,proto3" json:"eager_window_ms,omitempty"`
++	HoleTimeoutMs     uint32                 `protobuf:"varint,11,opt,name=hole_timeout_ms,json=holeTimeoutMs,proto3" json:"hole_timeout_ms,omitempty"`
++	unknownFields     protoimpl.UnknownFields
++	sizeCache         protoimpl.SizeCache
++}
++
++func (x *Config) Reset() {
++	*x = Config{}
++	mi := &file_transport_internet_xdrive_config_proto_msgTypes[0]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *Config) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*Config) ProtoMessage() {}
++
++func (x *Config) ProtoReflect() protoreflect.Message {
++	mi := &file_transport_internet_xdrive_config_proto_msgTypes[0]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use Config.ProtoReflect.Descriptor instead.
++func (*Config) Descriptor() ([]byte, []int) {
++	return file_transport_internet_xdrive_config_proto_rawDescGZIP(), []int{0}
++}
++
++func (x *Config) GetRemoteFolder() string {
++	if x != nil {
++		return x.RemoteFolder
++	}
++	return ""
++}
++
++func (x *Config) GetService() string {
++	if x != nil {
++		return x.Service
++	}
++	return ""
++}
++
++func (x *Config) GetSecrets() []string {
++	if x != nil {
++		return x.Secrets
++	}
++	return nil
++}
++
++func (x *Config) GetSegmentBytes() uint32 {
++	if x != nil {
++		return x.SegmentBytes
++	}
++	return 0
++}
++
++func (x *Config) GetFlushIntervalMs() uint32 {
++	if x != nil {
++		return x.FlushIntervalMs
++	}
++	return 0
++}
++
++func (x *Config) GetPollIntervalMs() uint32 {
++	if x != nil {
++		return x.PollIntervalMs
++	}
++	return 0
++}
++
++func (x *Config) GetMaxPollIntervalMs() uint32 {
++	if x != nil {
++		return x.MaxPollIntervalMs
++	}
++	return 0
++}
++
++func (x *Config) GetSessionTtlSeconds() uint32 {
++	if x != nil {
++		return x.SessionTtlSeconds
++	}
++	return 0
++}
++
++func (x *Config) GetConcurrency() uint32 {
++	if x != nil {
++		return x.Concurrency
++	}
++	return 0
++}
++
++func (x *Config) GetEagerWindowMs() uint32 {
++	if x != nil {
++		return x.EagerWindowMs
++	}
++	return 0
++}
++
++func (x *Config) GetHoleTimeoutMs() uint32 {
++	if x != nil {
++		return x.HoleTimeoutMs
++	}
++	return 0
++}
++
++var File_transport_internet_xdrive_config_proto protoreflect.FileDescriptor
++
++const file_transport_internet_xdrive_config_proto_rawDesc = "" +
++	"\n" +
++	"&transport/internet/xdrive/config.proto\x12\x1fv2fly.transport.internet.xdrive\"\xaf\x03\n" +
++	"\x06Config\x12#\n" +
++	"\rremote_folder\x18\x01 \x01(\tR\fremoteFolder\x12\x18\n" +
++	"\aservice\x18\x02 \x01(\tR\aservice\x12\x18\n" +
++	"\asecrets\x18\x03 \x03(\tR\asecrets\x12#\n" +
++	"\rsegment_bytes\x18\x04 \x01(\rR\fsegmentBytes\x12*\n" +
++	"\x11flush_interval_ms\x18\x05 \x01(\rR\x0fflushIntervalMs\x12(\n" +
++	"\x10poll_interval_ms\x18\x06 \x01(\rR\x0epollIntervalMs\x12/\n" +
++	"\x14max_poll_interval_ms\x18\a \x01(\rR\x11maxPollIntervalMs\x12.\n" +
++	"\x13session_ttl_seconds\x18\b \x01(\rR\x11sessionTtlSeconds\x12 \n" +
++	"\vconcurrency\x18\t \x01(\rR\vconcurrency\x12&\n" +
++	"\x0feager_window_ms\x18\n" +
++	" \x01(\rR\reagerWindowMs\x12&\n" +
++	"\x0fhole_timeout_ms\x18\v \x01(\rR\rholeTimeoutMsB:Z8github.com/v2fly/v2ray-core/v5/transport/internet/xdriveb\x06proto3"
++
++var (
++	file_transport_internet_xdrive_config_proto_rawDescOnce sync.Once
++	file_transport_internet_xdrive_config_proto_rawDescData []byte
++)
++
++func file_transport_internet_xdrive_config_proto_rawDescGZIP() []byte {
++	file_transport_internet_xdrive_config_proto_rawDescOnce.Do(func() {
++		file_transport_internet_xdrive_config_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_transport_internet_xdrive_config_proto_rawDesc), len(file_transport_internet_xdrive_config_proto_rawDesc)))
++	})
++	return file_transport_internet_xdrive_config_proto_rawDescData
++}
++
++var file_transport_internet_xdrive_config_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
++var file_transport_internet_xdrive_config_proto_goTypes = []any{
++	(*Config)(nil), // 0: v2fly.transport.internet.xdrive.Config
++}
++var file_transport_internet_xdrive_config_proto_depIdxs = []int32{
++	0, // [0:0] is the sub-list for method output_type
++	0, // [0:0] is the sub-list for method input_type
++	0, // [0:0] is the sub-list for extension type_name
++	0, // [0:0] is the sub-list for extension extendee
++	0, // [0:0] is the sub-list for field type_name
++}
++
++func init() { file_transport_internet_xdrive_config_proto_init() }
++func file_transport_internet_xdrive_config_proto_init() {
++	if File_transport_internet_xdrive_config_proto != nil {
++		return
++	}
++	type x struct{}
++	out := protoimpl.TypeBuilder{
++		File: protoimpl.DescBuilder{
++			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
++			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_internet_xdrive_config_proto_rawDesc), len(file_transport_internet_xdrive_config_proto_rawDesc)),
++			NumEnums:      0,
++			NumMessages:   1,
++			NumExtensions: 0,
++			NumServices:   0,
++		},
++		GoTypes:           file_transport_internet_xdrive_config_proto_goTypes,
++		DependencyIndexes: file_transport_internet_xdrive_config_proto_depIdxs,
++		MessageInfos:      file_transport_internet_xdrive_config_proto_msgTypes,
++	}.Build()
++	File_transport_internet_xdrive_config_proto = out.File
++	file_transport_internet_xdrive_config_proto_goTypes = nil
++	file_transport_internet_xdrive_config_proto_depIdxs = nil
++}
+diff --git a/transport/internet/xdrive/config.proto b/transport/internet/xdrive/config.proto
+new file mode 100644
+index 0000000..4ad1ba5
+--- /dev/null
++++ b/transport/internet/xdrive/config.proto
+@@ -0,0 +1,18 @@
++syntax = "proto3";
++
++package v2fly.transport.internet.xdrive;
++option go_package = "github.com/v2fly/v2ray-core/v5/transport/internet/xdrive";
++
++message Config {
++  string remote_folder = 1;
++  string service = 2;
++  repeated string secrets = 3;
++  uint32 segment_bytes = 4;
++  uint32 flush_interval_ms = 5;
++  uint32 poll_interval_ms = 6;
++  uint32 max_poll_interval_ms = 7;
++  uint32 session_ttl_seconds = 8;
++  uint32 concurrency = 9;
++  uint32 eager_window_ms = 10;
++  uint32 hole_timeout_ms = 11;
++}
+diff --git a/transport/internet/xdrive/conn.go b/transport/internet/xdrive/conn.go
+new file mode 100644
+index 0000000..68cde20
+--- /dev/null
++++ b/transport/internet/xdrive/conn.go
+@@ -0,0 +1,139 @@
++package xdrive
++
++import (
++	"context"
++	"os"
++	"sync"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/common/net"
++)
++
++var placeholderAddr = &net.TCPAddr{IP: net.IP{127, 0, 0, 1}, Port: 0}
++
++type Conn struct {
++	cancel  context.CancelFunc
++	writer  *walWriter
++	reader  *walReader
++	onClose func()
++
++	readBuf []byte
++
++	deadlineMu    sync.Mutex
++	readDeadline  time.Time
++	writeDeadline time.Time
++
++	closeOnce sync.Once
++	closeErr  error
++}
++
++func newConn(ctx context.Context, storage Storage, writePrefix, readPrefix string, p params, onClose func()) *Conn {
++	ctx, cancel := context.WithCancel(ctx)
++	return &Conn{
++		cancel:  cancel,
++		writer:  newWALWriter(ctx, storage, writePrefix, p),
++		reader:  newWALReader(ctx, storage, readPrefix, p),
++		onClose: onClose,
++	}
++}
++
++func (c *Conn) Read(b []byte) (int, error) {
++	if len(c.readBuf) == 0 {
++		data, err := c.receive()
++		if err != nil {
++			return 0, err
++		}
++		c.readBuf = data
++	}
++	n := copy(b, c.readBuf)
++	c.readBuf = c.readBuf[n:]
++	return n, nil
++}
++
++func (c *Conn) receive() ([]byte, error) {
++	deadline := c.getDeadline(true)
++	if deadline.IsZero() {
++		data, ok := <-c.reader.ch
++		if !ok {
++			return nil, c.reader.Err()
++		}
++		return data, nil
++	}
++
++	if !time.Now().Before(deadline) {
++		return nil, os.ErrDeadlineExceeded
++	}
++	timer := time.NewTimer(time.Until(deadline))
++	defer timer.Stop()
++
++	select {
++	case data, ok := <-c.reader.ch:
++		if !ok {
++			return nil, c.reader.Err()
++		}
++		return data, nil
++	case <-timer.C:
++		return nil, os.ErrDeadlineExceeded
++	}
++}
++
++func (c *Conn) Write(b []byte) (int, error) {
++	if deadline := c.getDeadline(false); !deadline.IsZero() && !time.Now().Before(deadline) {
++		return 0, os.ErrDeadlineExceeded
++	}
++	n, err := c.writer.Write(b)
++	if err == nil {
++		c.reader.Wake()
++	}
++	return n, err
++}
++
++func (c *Conn) Close() error {
++	c.closeOnce.Do(func() {
++		c.closeErr = c.writer.Close()
++		c.cancel()
++		if c.onClose != nil {
++			c.onClose()
++		}
++	})
++	return c.closeErr
++}
++
++func (c *Conn) LocalAddr() net.Addr {
++	return placeholderAddr
++}
++
++func (c *Conn) RemoteAddr() net.Addr {
++	return placeholderAddr
++}
++
++func (c *Conn) getDeadline(read bool) time.Time {
++	c.deadlineMu.Lock()
++	defer c.deadlineMu.Unlock()
++	if read {
++		return c.readDeadline
++	}
++	return c.writeDeadline
++}
++
++func (c *Conn) SetDeadline(t time.Time) error {
++	c.deadlineMu.Lock()
++	defer c.deadlineMu.Unlock()
++	c.readDeadline = t
++	c.writeDeadline = t
++	return nil
++}
++
++func (c *Conn) SetReadDeadline(t time.Time) error {
++	c.deadlineMu.Lock()
++	defer c.deadlineMu.Unlock()
++	c.readDeadline = t
++	return nil
++}
++
++func (c *Conn) SetWriteDeadline(t time.Time) error {
++	c.deadlineMu.Lock()
++	defer c.deadlineMu.Unlock()
++	c.writeDeadline = t
++	return nil
++}
+diff --git a/transport/internet/xdrive/params.go b/transport/internet/xdrive/params.go
+new file mode 100644
+index 0000000..01f80a3
+--- /dev/null
++++ b/transport/internet/xdrive/params.go
+@@ -0,0 +1,69 @@
++package xdrive
++
++import "time"
++
++const (
++	defaultSegmentBytes    = 512 * 1024
++	defaultFlushInterval   = 20 * time.Millisecond
++	defaultMinPollInterval = 50 * time.Millisecond
++	defaultMaxPollInterval = 500 * time.Millisecond
++	defaultEagerWindow     = 2 * time.Second
++	defaultHoleTimeout     = 30 * time.Second
++	defaultSessionTTL      = 5 * time.Minute
++	defaultConcurrency     = 8
++
++	maxSegmentBytes = 16 * 1024 * 1024
++	maxConcurrency  = 64
++)
++
++type params struct {
++	segmentBytes    int
++	flushInterval   time.Duration
++	minPollInterval time.Duration
++	maxPollInterval time.Duration
++	eagerWindow     time.Duration
++	holeTimeout     time.Duration
++	sessionTTL      time.Duration
++	concurrency     int
++}
++
++func millis(value uint32, fallback time.Duration) time.Duration {
++	if value == 0 {
++		return fallback
++	}
++	return time.Duration(value) * time.Millisecond
++}
++
++func seconds(value uint32, fallback time.Duration) time.Duration {
++	if value == 0 {
++		return fallback
++	}
++	return time.Duration(value) * time.Second
++}
++
++func capped(value uint32, fallback, limit int) int {
++	if value == 0 {
++		return fallback
++	}
++	if int(value) > limit {
++		return limit
++	}
++	return int(value)
++}
++
++func paramsFromConfig(c *Config) params {
++	p := params{
++		segmentBytes:    capped(c.SegmentBytes, defaultSegmentBytes, maxSegmentBytes),
++		flushInterval:   millis(c.FlushIntervalMs, defaultFlushInterval),
++		minPollInterval: millis(c.PollIntervalMs, defaultMinPollInterval),
++		maxPollInterval: millis(c.MaxPollIntervalMs, defaultMaxPollInterval),
++		eagerWindow:     millis(c.EagerWindowMs, defaultEagerWindow),
++		holeTimeout:     millis(c.HoleTimeoutMs, defaultHoleTimeout),
++		sessionTTL:      seconds(c.SessionTtlSeconds, defaultSessionTTL),
++		concurrency:     capped(c.Concurrency, defaultConcurrency, maxConcurrency),
++	}
++	if p.maxPollInterval < p.minPollInterval {
++		p.maxPollInterval = p.minPollInterval
++	}
++	return p
++}
+diff --git a/transport/internet/xdrive/s3.go b/transport/internet/xdrive/s3.go
+new file mode 100644
+index 0000000..d81503c
+--- /dev/null
++++ b/transport/internet/xdrive/s3.go
+@@ -0,0 +1,356 @@
++// SPDX-License-Identifier: MPL-2.0
++// Native private S3 backend for upstream XDRIVE. No public bucket policy,
++// expiring presigned packet URLs, or HeadBucket permission is required.
++package xdrive
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"encoding/xml"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"regexp"
++	"sort"
++	"strings"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++)
++
++const (
++	s3BodyLimit  = 20 << 20
++	s3MaxEntries = 10000
++	s3Attempts   = 4
++)
++
++// Secrets[0] is JSON to avoid adding fields to upstream's protobuf schema.
++type s3Credentials struct {
++	Endpoint  string `json:"endpoint"`
++	Region    string `json:"region"`
++	Bucket    string `json:"bucket"`
++	AccessKey string `json:"accessKey"`
++	SecretKey string `json:"secretKey"`
++}
++type s3Storage struct {
++	credentials s3Credentials
++	endpoint    *url.URL
++	prefix      string
++	client      *http.Client
++}
++
++var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
++var folderPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/?$`)
++
++func newS3Storage(settings *internet.MemoryStreamConfig, config *Config) (*s3Storage, error) {
++	c, u, prefix, err := parseS3Credentials(config)
++	if err != nil {
++		return nil, err
++	}
++	client := newServiceClient(settings, 25*time.Second, 8)
++	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
++	return &s3Storage{c, u, prefix, client}, nil
++}
++
++func validateS3Credentials(config *Config) error {
++	_, _, _, err := parseS3Credentials(config)
++	return err
++}
++
++func parseS3Credentials(config *Config) (s3Credentials, *url.URL, string, error) {
++	if len(config.Secrets) != 1 {
++		return s3Credentials{}, nil, "", errors.New("S3 requires one credentials JSON")
++	}
++	var c s3Credentials
++	if json.Unmarshal([]byte(config.Secrets[0]), &c) != nil {
++		return s3Credentials{}, nil, "", errors.New("invalid S3 credentials JSON")
++	}
++	u, err := url.Parse(c.Endpoint)
++	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
++		return s3Credentials{}, nil, "", errors.New("S3 endpoint must be an HTTPS origin without credentials, path or query")
++	}
++	if !bucketPattern.MatchString(c.Bucket) || c.Region == "" || c.AccessKey == "" || c.SecretKey == "" {
++		return s3Credentials{}, nil, "", errors.New("S3 bucket, region and scoped credentials are required")
++	}
++	if !folderPattern.MatchString(config.RemoteFolder) {
++		return s3Credentials{}, nil, "", errors.New("S3 requires a nonempty isolated prefix")
++	}
++	return c, u, strings.Trim(config.RemoteFolder, "/") + "/", nil
++}
++
++func safeS3Name(name string) bool {
++	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "\\\x00\r\n") {
++		return false
++	}
++	for _, part := range strings.Split(name, "/") {
++		if part == "" || part == "." || part == ".." {
++			return false
++		}
++	}
++	return true
++}
++
++func s3Escape(value string, keepSlash bool) string {
++	var b strings.Builder
++	for i := 0; i < len(value); i++ {
++		c := value[i]
++		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
++			c == '-' || c == '_' || c == '.' || c == '~' || keepSlash && c == '/' {
++			b.WriteByte(c)
++		} else {
++			fmt.Fprintf(&b, "%%%02X", c)
++		}
++	}
++	return b.String()
++}
++
++func s3CanonicalQuery(query url.Values) string {
++	pairs := make([]string, 0, len(query))
++	for key, values := range query {
++		for _, value := range values {
++			pairs = append(pairs, s3Escape(key, false)+"="+s3Escape(value, false))
++		}
++	}
++	sort.Strings(pairs)
++	return strings.Join(pairs, "&")
++}
++
++func s3HMACSHA256(key []byte, message string) []byte {
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte(message))
++	return mac.Sum(nil)
++}
++
++func s3Authorize(method, host, path, query, payloadHash, accessKey, secretKey, region string, now time.Time) (string, string) {
++	stamp := now.UTC().Format("20060102T150405Z")
++	day := stamp[:8]
++	const signedHeaders = "host;x-amz-content-sha256;x-amz-date"
++	headers := "host:" + host + "\nx-amz-content-sha256:" + payloadHash + "\nx-amz-date:" + stamp + "\n"
++	canonicalRequest := strings.Join([]string{method, path, query, headers, signedHeaders, payloadHash}, "\n")
++	scope := day + "/" + region + "/s3/aws4_request"
++	canonicalHash := sha256.Sum256([]byte(canonicalRequest))
++	stringToSign := "AWS4-HMAC-SHA256\n" + stamp + "\n" + scope + "\n" + hex.EncodeToString(canonicalHash[:])
++	signingKey := s3HMACSHA256([]byte("AWS4"+secretKey), day)
++	signingKey = s3HMACSHA256(signingKey, region)
++	signingKey = s3HMACSHA256(signingKey, "s3")
++	signingKey = s3HMACSHA256(signingKey, "aws4_request")
++	signature := hex.EncodeToString(s3HMACSHA256(signingKey, stringToSign))
++	authorization := "AWS4-HMAC-SHA256 Credential=" + accessKey + "/" + scope +
++		", SignedHeaders=" + signedHeaders + ", Signature=" + signature
++	return stamp, authorization
++}
++
++func (s *s3Storage) request(ctx context.Context, method, key string, query url.Values, data []byte) (int, []byte, error) {
++	if len(data) > s3BodyLimit {
++		return 0, nil, errors.New("S3 segment too large")
++	}
++	path := "/" + s.credentials.Bucket
++	if key != "" {
++		path += "/" + s3Escape(key, true)
++	}
++	canonicalQuery := s3CanonicalQuery(query)
++	requestURL := s.endpoint.Scheme + "://" + s.endpoint.Host + path
++	if canonicalQuery != "" {
++		requestURL += "?" + canonicalQuery
++	}
++	digest := sha256.Sum256(data)
++	hash := hex.EncodeToString(digest[:])
++	for attempt := 0; attempt < s3Attempts; attempt++ {
++		if attempt > 0 {
++			select {
++			case <-ctx.Done():
++				return 0, nil, ctx.Err()
++			case <-time.After(time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond):
++			}
++		}
++		req, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(data))
++		if err != nil {
++			return 0, nil, errors.New("invalid S3 request")
++		}
++		stamp, authorization := s3Authorize(method, req.URL.Host, path, canonicalQuery, hash,
++			s.credentials.AccessKey, s.credentials.SecretKey, s.credentials.Region, time.Now())
++		req.Header.Set("X-Amz-Date", stamp)
++		req.Header.Set("X-Amz-Content-Sha256", hash)
++		req.Header.Set("Authorization", authorization)
++		resp, err := s.client.Do(req)
++		if err != nil {
++			if ctx.Err() != nil {
++				return 0, nil, ctx.Err()
++			}
++			if attempt < s3Attempts-1 {
++				continue
++			}
++			return 0, nil, errors.New("S3 network or certificate error")
++		}
++		body, readErr := io.ReadAll(io.LimitReader(resp.Body, s3BodyLimit+1))
++		resp.Body.Close()
++		if readErr != nil {
++			return 0, nil, errors.New("S3 response read failed")
++		}
++		if len(body) > s3BodyLimit {
++			return 0, nil, errors.New("S3 response exceeds safety limit")
++		}
++		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < s3Attempts-1 {
++			continue
++		}
++		return resp.StatusCode, body, nil
++	}
++	return 0, nil, errors.New("S3 retry budget exhausted")
++}
++
++func s3Status(operation string, status int) error {
++	// Do not log response bodies: S3 errors can contain canonical requests/keys.
++	return fmt.Errorf("S3 %s HTTP %d", operation, status)
++}
++func (s *s3Storage) Put(ctx context.Context, name string, data []byte) error {
++	if !safeS3Name(name) {
++		return errors.New("unsafe S3 object name")
++	}
++	status, _, err := s.request(ctx, "PUT", s.prefix+name, nil, data)
++	if err != nil {
++		return err
++	}
++	if status/100 != 2 {
++		return s3Status("PUT", status)
++	}
++	return nil
++}
++func (s *s3Storage) Get(ctx context.Context, name string) ([]byte, error) {
++	if !safeS3Name(name) {
++		return nil, errors.New("unsafe S3 object name")
++	}
++	status, body, err := s.request(ctx, "GET", s.prefix+name, nil, nil)
++	if err != nil {
++		return nil, err
++	}
++	if status == 404 {
++		return nil, errNotFound
++	}
++	if status != 200 {
++		return nil, s3Status("GET", status)
++	}
++	return body, nil
++}
++
++type s3Listing struct {
++	Truncated bool   `xml:"IsTruncated"`
++	Token     string `xml:"NextContinuationToken"`
++	Contents  []struct {
++		Key string `xml:"Key"`
++	} `xml:"Contents"`
++	Common []struct {
++		Prefix string `xml:"Prefix"`
++	} `xml:"CommonPrefixes"`
++}
++
++func (s *s3Storage) listKeys(ctx context.Context, prefix string, recursive bool) ([]string, error) {
++	q := url.Values{"list-type": {"2"}, "prefix": {prefix}, "max-keys": {"1000"}}
++	if !recursive {
++		q.Set("delimiter", "/")
++	}
++	var keys []string
++	seen := map[string]bool{}
++	for pages := 0; pages < 100; pages++ {
++		status, body, err := s.request(ctx, "GET", "", q, nil)
++		if err != nil {
++			return nil, err
++		}
++		if status != 200 {
++			return nil, s3Status("LIST", status)
++		}
++		var page s3Listing
++		if xml.Unmarshal(body, &page) != nil {
++			return nil, errors.New("invalid S3 listing XML")
++		}
++		add := func(key string) error {
++			if !strings.HasPrefix(key, prefix) {
++				return errors.New("S3 returned an object outside requested prefix")
++			}
++			if !seen[key] {
++				seen[key] = true
++				keys = append(keys, key)
++			}
++			if len(keys) > s3MaxEntries {
++				return errors.New("S3 listing safety limit reached; clean stale sessions")
++			}
++			return nil
++		}
++		for _, v := range page.Contents {
++			if err := add(v.Key); err != nil {
++				return nil, err
++			}
++		}
++		for _, v := range page.Common {
++			if err := add(v.Prefix); err != nil {
++				return nil, err
++			}
++		}
++		if !page.Truncated {
++			return keys, nil
++		}
++		if page.Token == "" || page.Token == q.Get("continuation-token") {
++			return nil, errors.New("invalid S3 pagination token")
++		}
++		q.Set("continuation-token", page.Token)
++	}
++	return nil, errors.New("S3 pagination limit reached")
++}
++func (s *s3Storage) List(ctx context.Context, prefix string) ([]Entry, error) {
++	if !safeS3Name(prefix) {
++		return nil, errors.New("unsafe S3 prefix")
++	}
++	root := s.prefix + prefix + "/"
++	keys, err := s.listKeys(ctx, root, false)
++	if err != nil {
++		return nil, err
++	}
++	entries := make([]Entry, 0, len(keys))
++	for _, key := range keys {
++		name := strings.TrimSuffix(strings.TrimPrefix(key, root), "/")
++		if name != "" && !strings.Contains(name, "/") {
++			entries = append(entries, Entry{Name: name})
++		}
++	}
++	return entries, nil
++}
++func (s *s3Storage) deleteKey(ctx context.Context, key string) error {
++	status, _, err := s.request(ctx, "DELETE", key, nil, nil)
++	if err != nil {
++		return err
++	}
++	if status != 404 && status/100 != 2 {
++		return s3Status("DELETE", status)
++	}
++	return nil
++}
++func (s *s3Storage) Delete(ctx context.Context, name string) error {
++	if !safeS3Name(name) {
++		return errors.New("unsafe S3 object name")
++	}
++	key := s.prefix + name
++	if strings.HasPrefix(name, "streams/") && strings.Count(name, "/") == 1 {
++		keys, err := s.listKeys(ctx, key+"/", true)
++		if err != nil {
++			return err
++		}
++		for _, k := range keys {
++			if err := s.deleteKey(ctx, k); err != nil {
++				return err
++			}
++		}
++		return nil
++	}
++	return s.deleteKey(ctx, key)
++}
++func (s *s3Storage) Close() error {
++	if transport, ok := s.client.Transport.(*http.Transport); ok {
++		transport.CloseIdleConnections()
++	}
++	return nil
++}
+diff --git a/transport/internet/xdrive/s3_test.go b/transport/internet/xdrive/s3_test.go
+new file mode 100644
+index 0000000..5f52bc2
+--- /dev/null
++++ b/transport/internet/xdrive/s3_test.go
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: MPL-2.0
++package xdrive
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++)
++
++func testS3(t *testing.T, handler http.HandlerFunc) (*s3Storage, *httptest.Server) {
++	t.Helper()
++	ts := httptest.NewTLSServer(handler)
++	t.Cleanup(ts.Close)
++	raw, _ := json.Marshal(s3Credentials{Endpoint: ts.URL, Region: "ru-msk", Bucket: "test-bucket", AccessKey: "TESTACCESS", SecretKey: "TESTSECRET"})
++	c := &Config{Service: "S3", RemoteFolder: "private/device1", Secrets: []string{string(raw)}}
++	s, err := newS3Storage(&internet.MemoryStreamConfig{ProtocolSettings: c}, c)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Unit tests trust only the test server's generated certificate.
++	s.client = ts.Client()
++	s.client.Timeout = 2 * time.Second
++	s.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
++	return s, ts
++}
++func digestString(s string) string { d := sha256.Sum256([]byte(s)); return hex.EncodeToString(d[:]) }
++func mac(key []byte, s string) []byte {
++	h := hmac.New(sha256.New, key)
++	h.Write([]byte(s))
++	return h.Sum(nil)
++}
++
++// Independently verify the manual SigV4 signature, including escaped paths.
++func verifySignature(t *testing.T, r *http.Request, body []byte) {
++	t.Helper()
++	auth := r.Header.Get("Authorization")
++	parts := strings.Split(auth, "SignedHeaders=")
++	if len(parts) != 2 {
++		t.Errorf("missing SigV4 header")
++		return
++	}
++	signed := strings.Split(parts[1], ",")[0]
++	headers := ""
++	for _, key := range strings.Split(signed, ";") {
++		value := r.Header.Get(key)
++		if key == "host" {
++			value = r.Host
++		}
++		headers += key + ":" + strings.Join(strings.Fields(value), " ") + "\n"
++	}
++	hash := digestString(string(body))
++	if r.Header.Get("X-Amz-Content-Sha256") != hash {
++		t.Error("payload hash mismatch")
++	}
++	canonical := r.Method + "\n" + r.URL.EscapedPath() + "\n" + strings.ReplaceAll(r.URL.Query().Encode(), "+", "%20") + "\n" + headers + "\n" + signed + "\n" + hash
++	date := r.Header.Get("X-Amz-Date")
++	if len(date) < 8 {
++		t.Error("invalid date")
++		return
++	}
++	scope := date[:8] + "/ru-msk/s3/aws4_request"
++	key := mac([]byte("AWS4TESTSECRET"), date[:8])
++	key = mac(key, "ru-msk")
++	key = mac(key, "s3")
++	key = mac(key, "aws4_request")
++	signature := hex.EncodeToString(mac(key, "AWS4-HMAC-SHA256\n"+date+"\n"+scope+"\n"+digestString(canonical)))
++	if !strings.HasSuffix(auth, "Signature="+signature) {
++		t.Error("signature mismatch")
++	}
++}
++func TestS3SigningAndScopedOperations(t *testing.T) {
++	var puts atomic.Int32
++	var saved []byte
++	s, _ := testS3(t, func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		verifySignature(t, r, body)
++		if r.URL.Path != "/test-bucket/private/device1/streams/a/c2s/a b.seg" {
++			t.Error("wrong scoped key")
++		}
++		switch r.Method {
++		case "PUT":
++			saved = append([]byte(nil), body...)
++			puts.Add(1)
++			w.WriteHeader(200)
++		case "GET":
++			w.Write(saved)
++		case "DELETE":
++			w.WriteHeader(204)
++		default:
++			t.Error("unexpected method")
++		}
++	})
++	ctx := context.Background()
++	name := "streams/a/c2s/a b.seg"
++	if err := s.Put(ctx, name, []byte("data")); err != nil {
++		t.Fatal(err)
++	}
++	got, err := s.Get(ctx, name)
++	if err != nil || string(got) != "data" {
++		t.Fatal("get failed", err)
++	}
++	if err := s.Delete(ctx, name); err != nil {
++		t.Fatal(err)
++	}
++	if puts.Load() != 1 {
++		t.Fatal("PUT count")
++	}
++}
++func TestS3PaginationAndDirectories(t *testing.T) {
++	var calls atomic.Int32
++	s, _ := testS3(t, func(w http.ResponseWriter, r *http.Request) {
++		verifySignature(t, r, nil)
++		calls.Add(1)
++		if r.URL.Query().Get("prefix") != "private/device1/streams/" || r.URL.Query().Get("delimiter") != "/" {
++			t.Error("prefix/delimiter lost")
++		}
++		if r.URL.Query().Get("continuation-token") == "" {
++			fmt.Fprint(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next+/=</NextContinuationToken><CommonPrefixes><Prefix>private/device1/streams/a/</Prefix></CommonPrefixes></ListBucketResult>`)
++		} else {
++			if r.URL.Query().Get("continuation-token") != "next+/=" {
++				t.Error("token encoding")
++			}
++			fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>private/device1/streams/b/</Prefix></CommonPrefixes></ListBucketResult>`)
++		}
++	})
++	entries, err := s.List(context.Background(), "streams")
++	if err != nil || len(entries) != 2 || entries[0].Name != "a" || entries[1].Name != "b" || calls.Load() != 2 {
++		t.Fatal(entries, err)
++	}
++}
++func TestS3FailClosedAndRedaction(t *testing.T) {
++	s, ts := testS3(t, func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(403)
++		fmt.Fprint(w, "SECRET_CANONICAL_REQUEST")
++	})
++	err := s.Put(context.Background(), "sessions/a", nil)
++	if err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), ts.URL) {
++		t.Fatal("unsafe error", err)
++	}
++	for _, name := range []string{"", "../a", "/a", "a/../b", "a//b", "a\\b"} {
++		if s.Put(context.Background(), name, nil) == nil {
++			t.Fatal("accepted unsafe key")
++		}
++	}
++}
++func TestS3RedirectNotFollowed(t *testing.T) {
++	var redirected atomic.Bool
++	sink := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Store(true) }))
++	defer sink.Close()
++	s, _ := testS3(t, func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Location", sink.URL); w.WriteHeader(307) })
++	if s.Put(context.Background(), "sessions/a", nil) == nil {
++		t.Fatal("redirect accepted")
++	}
++	if redirected.Load() {
++		t.Fatal("redirect followed")
++	}
++}
++func TestS3MissingObjectAndCancellation(t *testing.T) {
++	s, _ := testS3(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
++	if _, err := s.Get(context.Background(), "sessions/a"); err != errNotFound {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if err := s.Put(ctx, "sessions/a", nil); err == nil {
++		t.Fatal("cancellation ignored")
++	}
++}
++func TestS3InvalidConfiguration(t *testing.T) {
++	for _, endpoint := range []string{"http://example.com", "https://user:pass@example.com", "https://example.com/path", "https://example.com?q=1"} {
++		raw, _ := json.Marshal(s3Credentials{Endpoint: endpoint, Region: "ru-msk", Bucket: "test-bucket", AccessKey: "a", SecretKey: "b"})
++		cfg := &Config{Service: "S3", RemoteFolder: "private/device1", Secrets: []string{string(raw)}}
++		if _, err := newS3Storage(nil, cfg); err == nil {
++			t.Fatal("unsafe endpoint accepted")
++		}
++	}
++}
++
++func TestS3RejectsInvalidBucketAndPrefix(t *testing.T) {
++	valid := s3Credentials{Endpoint: "https://example.com", Region: "ru-msk", Bucket: "test-bucket", AccessKey: "a", SecretKey: "b"}
++	for _, test := range []struct {
++		name   string
++		bucket string
++		prefix string
++	}{
++		{"invalid bucket", "Bucket", "private/device1"},
++		{"short bucket", "ab", "private/device1"},
++		{"empty prefix", valid.Bucket, ""},
++		{"traversing prefix", valid.Bucket, "private/../device1"},
++		{"dot prefix segment", valid.Bucket, "private/./device1"},
++		{"empty prefix segment", valid.Bucket, "private//device1"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			credentials := valid
++			credentials.Bucket = test.bucket
++			raw, _ := json.Marshal(credentials)
++			config := &Config{Service: "S3", RemoteFolder: test.prefix, Secrets: []string{string(raw)}}
++			if _, err := newS3Storage(nil, config); err == nil {
++				t.Fatal("invalid bucket or prefix accepted")
++			}
++		})
++	}
++}
++
++func TestS3RejectsUnsafeNamesForAllOperations(t *testing.T) {
++	s, _ := testS3(t, func(http.ResponseWriter, *http.Request) {
++		t.Fatal("unsafe name reached S3")
++	})
++	for _, name := range []string{"", "../a", "/a", "a/../b", "a//b", "a\\b"} {
++		if err := s.Put(context.Background(), name, nil); err == nil {
++			t.Errorf("Put accepted unsafe name %q", name)
++		}
++		if _, err := s.Get(context.Background(), name); err == nil {
++			t.Errorf("Get accepted unsafe name %q", name)
++		}
++		if err := s.Delete(context.Background(), name); err == nil {
++			t.Errorf("Delete accepted unsafe name %q", name)
++		}
++		if _, err := s.List(context.Background(), name); err == nil {
++			t.Errorf("List accepted unsafe prefix %q", name)
++		}
++	}
++}
++
++func TestS3BackpressureCancellationDoesNotSpinOnClose(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	w := &walWriter{ctx: ctx, params: params{segmentBytes: 1}, sem: make(chan struct{}, 1), buf: []byte("x")}
++	w.sem <- struct{}{}
++	cancel()
++	done := make(chan error, 1)
++	go func() { done <- w.Close() }()
++	select {
++	case err := <-done:
++		if err == nil {
++			t.Fatal("cancelled close succeeded")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("cancelled writer close blocked")
++	}
++}
+diff --git a/transport/internet/xdrive/service_client.go b/transport/internet/xdrive/service_client.go
+new file mode 100644
+index 0000000..a470149
+--- /dev/null
++++ b/transport/internet/xdrive/service_client.go
+@@ -0,0 +1,43 @@
++package xdrive
++
++import (
++	"context"
++	stdtls "crypto/tls"
++	"net/http"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/common/net"
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++	coretls "github.com/v2fly/v2ray-core/v5/transport/internet/tls"
++)
++
++func newServiceClient(settings *internet.MemoryStreamConfig, timeout time.Duration, maxConns int) *http.Client {
++	var socketSettings *internet.SocketConfig
++	tlsConfig := &stdtls.Config{MinVersion: stdtls.VersionTLS12}
++	if settings != nil {
++		socketSettings = settings.SocketSettings
++		if config := coretls.ConfigFromStreamSettings(settings); config != nil {
++			tlsConfig = config.GetTLSConfig(coretls.WithNextProto("http/1.1"))
++			tlsConfig.ServerName = ""
++		}
++	}
++	if len(tlsConfig.NextProtos) == 0 {
++		tlsConfig.NextProtos = []string{"http/1.1"}
++	}
++
++	transport := &http.Transport{
++		TLSClientConfig:     tlsConfig,
++		IdleConnTimeout:     60 * time.Second,
++		MaxIdleConns:        maxConns,
++		MaxIdleConnsPerHost: maxConns,
++		MaxConnsPerHost:     maxConns,
++		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
++			dest, err := net.ParseDestination("tcp:" + addr)
++			if err != nil {
++				return nil, err
++			}
++			return internet.DialSystem(ctx, dest, socketSettings)
++		},
++	}
++	return &http.Client{Transport: transport, Timeout: timeout}
++}
+diff --git a/transport/internet/xdrive/storage.go b/transport/internet/xdrive/storage.go
+new file mode 100644
+index 0000000..ce2ad4d
+--- /dev/null
++++ b/transport/internet/xdrive/storage.go
+@@ -0,0 +1,34 @@
++package xdrive
++
++import (
++	"context"
++
++	"github.com/v2fly/v2ray-core/v5/transport/internet"
++)
++
++type Entry struct {
++	Name   string
++	Inline []byte
++}
++
++type Storage interface {
++	Put(context.Context, string, []byte) error
++	Get(context.Context, string) ([]byte, error)
++	Delete(context.Context, string) error
++	List(context.Context, string) ([]Entry, error)
++	Close() error
++}
++
++func newStorage(settings *internet.MemoryStreamConfig) (Storage, error) {
++	if settings == nil {
++		return nil, errInvalidConfig
++	}
++	config, ok := settings.ProtocolSettings.(*Config)
++	if !ok || config == nil {
++		return nil, errInvalidConfig
++	}
++	if config.Service != "S3" {
++		return nil, errUnsupportedService
++	}
++	return newS3Storage(settings, config)
++}
+diff --git a/transport/internet/xdrive/wal.go b/transport/internet/xdrive/wal.go
+new file mode 100644
+index 0000000..d122bd2
+--- /dev/null
++++ b/transport/internet/xdrive/wal.go
+@@ -0,0 +1,447 @@
++package xdrive
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/v2fly/v2ray-core/v5/common/errors"
++)
++
++const (
++	maxCoalescedTicks = 8
++
++	segSuffix = ".seg"
++	endSuffix = ".end"
++	errSuffix = ".err"
++)
++
++func objectName(prefix string, seq int64, suffix string) string {
++	return fmt.Sprintf("%s/%09d%s", prefix, seq, suffix)
++}
++
++func parseEntry(name string) (int64, bool) {
++	dot := strings.LastIndexByte(name, '.')
++	if dot < 0 {
++		return 0, false
++	}
++	switch name[dot:] {
++	case segSuffix, endSuffix, errSuffix:
++	default:
++		return 0, false
++	}
++	seq, err := strconv.ParseInt(name[:dot], 10, 64)
++	if err != nil || seq < 0 {
++		return 0, false
++	}
++	return seq, true
++}
++
++type walWriter struct {
++	ctx     context.Context
++	storage Storage
++	prefix  string
++	params
++	sem chan struct{}
++	wg  sync.WaitGroup
++
++	mu       sync.Mutex
++	buf      []byte
++	seq      int64
++	lastSize int
++	held     int
++	closed   bool
++	err      error
++}
++
++func newWALWriter(ctx context.Context, storage Storage, prefix string, p params) *walWriter {
++	w := &walWriter{
++		ctx:     ctx,
++		storage: storage,
++		prefix:  prefix,
++		params:  p,
++		sem:     make(chan struct{}, p.concurrency),
++	}
++	go w.flushLoop()
++	return w
++}
++
++func (w *walWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++
++	if w.err != nil {
++		return 0, w.err
++	}
++	if w.closed {
++		return 0, io.ErrClosedPipe
++	}
++
++	w.buf = append(w.buf, p...)
++	for len(w.buf) >= w.segmentBytes {
++		if err := w.flushLocked(); err != nil {
++			return 0, err
++		}
++	}
++	return len(p), nil
++}
++
++func (w *walWriter) flushLoop() {
++	ticker := time.NewTicker(w.flushInterval)
++	defer ticker.Stop()
++
++	for {
++		select {
++		case <-w.ctx.Done():
++			return
++		case <-ticker.C:
++			w.mu.Lock()
++			if !w.closed && w.err == nil && len(w.buf) > 0 && w.readyToFlush() {
++				w.flushLocked()
++			}
++			done := w.closed || w.err != nil
++			w.mu.Unlock()
++			if done {
++				return
++			}
++		}
++	}
++}
++
++func (w *walWriter) readyToFlush() bool {
++	grew := len(w.buf) > w.lastSize
++	w.lastSize = len(w.buf)
++
++	if grew && w.held < maxCoalescedTicks {
++		w.held++
++		return false
++	}
++	w.held = 0
++	return true
++}
++
++func (w *walWriter) flushLocked() error {
++	if len(w.buf) == 0 {
++		return nil
++	}
++	if w.err != nil {
++		return w.err
++	}
++
++	select {
++	case w.sem <- struct{}{}:
++	case <-w.ctx.Done():
++		w.err = w.ctx.Err()
++		return w.err
++	}
++
++	n := len(w.buf)
++	if n > w.segmentBytes {
++		n = w.segmentBytes
++	}
++
++	chunk := make([]byte, n)
++	copy(chunk, w.buf[:n])
++	seq := w.seq
++	w.seq++
++
++	if n == len(w.buf) {
++		w.buf = w.buf[:0]
++	} else {
++		w.buf = append(w.buf[:0], w.buf[n:]...)
++	}
++	w.lastSize = len(w.buf)
++	w.held = 0
++
++	w.wg.Add(1)
++	go w.upload(seq, chunk)
++	return nil
++}
++
++func (w *walWriter) upload(seq int64, chunk []byte) {
++	defer w.wg.Done()
++
++	err := w.storage.Put(w.ctx, objectName(w.prefix, seq, segSuffix), chunk)
++	<-w.sem
++	if err != nil {
++		w.mu.Lock()
++		if w.err == nil {
++			w.err = errors.New("failed to store segment").Base(err)
++		}
++		w.mu.Unlock()
++		w.storage.Put(w.ctx, objectName(w.prefix, seq, errSuffix), nil)
++	}
++}
++
++func (w *walWriter) Close() error {
++	w.mu.Lock()
++	if w.closed {
++		w.mu.Unlock()
++		return nil
++	}
++	w.closed = true
++	for len(w.buf) > 0 && w.err == nil {
++		w.flushLocked()
++	}
++	w.mu.Unlock()
++
++	w.wg.Wait()
++
++	w.mu.Lock()
++	err, seq := w.err, w.seq
++	w.mu.Unlock()
++
++	if err != nil {
++		return err
++	}
++	return w.storage.Put(w.ctx, objectName(w.prefix, seq, endSuffix), nil)
++}
++
++type walReader struct {
++	ctx     context.Context
++	storage Storage
++	prefix  string
++	params
++	seq int64
++
++	ch        chan []byte
++	discards  chan string
++	wake      chan struct{}
++	holeSince time.Time
++
++	errMu sync.Mutex
++	err   error
++}
++
++func newWALReader(ctx context.Context, storage Storage, prefix string, p params) *walReader {
++	r := &walReader{
++		ctx:      ctx,
++		storage:  storage,
++		prefix:   prefix,
++		params:   p,
++		ch:       make(chan []byte, p.concurrency),
++		discards: make(chan string, 4*p.concurrency),
++		wake:     make(chan struct{}, 1),
++	}
++	go r.run()
++	go r.discardLoop()
++	return r
++}
++
++func (r *walReader) Wake() {
++	select {
++	case r.wake <- struct{}{}:
++	default:
++	}
++}
++
++func (r *walReader) run() {
++	defer close(r.ch)
++
++	delay := r.minPollInterval
++	active := time.Now()
++	for {
++		polled := time.Now()
++		advanced, eof, err := r.poll()
++		if err != nil {
++			r.setErr(err)
++			return
++		}
++		if eof {
++			return
++		}
++
++		switch {
++		case advanced:
++			active = time.Now()
++			delay = r.minPollInterval
++		case time.Since(active) < r.eagerWindow:
++			delay = r.minPollInterval
++		default:
++			delay *= 2
++			if delay > r.maxPollInterval {
++				delay = r.maxPollInterval
++			}
++		}
++
++		timer := time.NewTimer(delay)
++		select {
++		case <-r.ctx.Done():
++			timer.Stop()
++			return
++		case <-timer.C:
++		case <-r.wake:
++			timer.Stop()
++			active = time.Now()
++			delay = r.minPollInterval
++			if rest := r.minPollInterval - time.Since(polled); rest > 0 {
++				select {
++				case <-r.ctx.Done():
++					return
++				case <-time.After(rest):
++				}
++			}
++		}
++	}
++}
++
++func (r *walReader) poll() (advanced, eof bool, err error) {
++	listed, err := r.storage.List(r.ctx, r.prefix)
++	if err != nil {
++		return false, false, err
++	}
++	if len(listed) == 0 {
++		return false, false, nil
++	}
++
++	pending := make(map[int64]Entry, len(listed))
++	ahead := false
++	for _, entry := range listed {
++		seq, ok := parseEntry(entry.Name)
++		if !ok {
++			continue
++		}
++		pending[seq] = entry
++		if seq > r.seq {
++			ahead = true
++		}
++	}
++
++	if _, ok := pending[r.seq]; !ok && ahead {
++		if r.holeSince.IsZero() {
++			r.holeSince = time.Now()
++		} else if time.Since(r.holeSince) >= r.holeTimeout {
++			return false, false, errors.New("segment ", r.seq,
++				" never arrived while later ones did, the peer lost it")
++		}
++	} else {
++		r.holeSince = time.Time{}
++	}
++
++	for {
++		if entry, ok := pending[r.seq]; ok && strings.HasSuffix(entry.Name, errSuffix) {
++			r.discard(r.prefix + "/" + entry.Name)
++			return advanced, false, errors.New("the peer could not store segment ", r.seq)
++		}
++
++		batch, done := r.nextBatch(pending)
++		if done {
++			return advanced, true, nil
++		}
++		if len(batch) == 0 {
++			return advanced, false, nil
++		}
++
++		chunks, err := r.fetch(batch)
++		if err != nil {
++			if err == errNotFound {
++				return advanced, false, nil
++			}
++			return advanced, false, err
++		}
++
++		for i, chunk := range chunks {
++			select {
++			case r.ch <- chunk:
++			case <-r.ctx.Done():
++				return advanced, true, nil
++			}
++			r.seq++
++			advanced = true
++			r.discard(r.prefix + "/" + batch[i].Name)
++		}
++	}
++}
++
++func (r *walReader) nextBatch(pending map[int64]Entry) (batch []Entry, done bool) {
++	for i := 0; i < r.concurrency; i++ {
++		entry, ok := pending[r.seq+int64(i)]
++		if !ok {
++			break
++		}
++		if !strings.HasSuffix(entry.Name, segSuffix) {
++			if i == 0 && strings.HasSuffix(entry.Name, endSuffix) {
++				r.discard(r.prefix + "/" + entry.Name)
++				return nil, true
++			}
++			break
++		}
++		batch = append(batch, entry)
++	}
++	return batch, false
++}
++
++func (r *walReader) fetch(batch []Entry) ([][]byte, error) {
++	chunks := make([][]byte, len(batch))
++	failures := make([]error, len(batch))
++
++	var wg sync.WaitGroup
++	for i, entry := range batch {
++		if entry.Inline != nil {
++			chunks[i] = entry.Inline
++			continue
++		}
++		wg.Add(1)
++		go func(i int, name string) {
++			defer wg.Done()
++			chunks[i], failures[i] = r.storage.Get(r.ctx, r.prefix+"/"+name)
++		}(i, entry.Name)
++	}
++	wg.Wait()
++
++	for i := range batch {
++		if failures[i] != nil {
++			return nil, failures[i]
++		}
++	}
++	return chunks, nil
++}
++
++func (r *walReader) discard(name string) {
++	select {
++	case r.discards <- name:
++	default:
++	}
++}
++
++func (r *walReader) discardLoop() {
++	var wg sync.WaitGroup
++	defer wg.Wait()
++
++	sem := make(chan struct{}, r.concurrency)
++	for {
++		select {
++		case <-r.ctx.Done():
++			return
++		case name := <-r.discards:
++			sem <- struct{}{}
++			wg.Add(1)
++			go func(name string) {
++				defer wg.Done()
++				defer func() { <-sem }()
++				r.storage.Delete(r.ctx, name)
++			}(name)
++		}
++	}
++}
++
++func (r *walReader) setErr(err error) {
++	r.errMu.Lock()
++	defer r.errMu.Unlock()
++	if r.err == nil {
++		r.err = err
++	}
++}
++
++func (r *walReader) Err() error {
++	r.errMu.Lock()
++	defer r.errMu.Unlock()
++	if r.err != nil {
++		return r.err
++	}
++	return io.EOF
++}

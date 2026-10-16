@@ -54,7 +54,13 @@ SigV4, do not follow redirects, and use the core's system dialer/socket settings
 Optional segment, polling, session-TTL, and concurrency settings use the XDRIVE
 defaults when omitted.
 
-The local V2Fly core under `third_party/v2ray-core` is based on v5.51.2 and contains
-the parser and dialer integration required for `network: "xdrive"`; do not remove
-the `replace` directive in `go.mod` unless the updated core is incorporated
-elsewhere.
+The local V2Fly core under `third_party/v2ray-core` contains the parser and dialer
+integration required for `network: "xdrive"`. The customization is preserved in
+`patches/v2ray-core-xdrive.patch` and reapplied when updating the core.
+
+To update manually, run `bash scripts/update-v2ray-core.sh v5.x.y`, then
+`go mod tidy` and the Go tests. The updater stages the upstream module and applies
+the patch before replacing the local core, so an upstream change that conflicts
+with XDRIVE stops the update without discarding the current core. Resolve the
+conflict by rebasing the patch and its tests against the new core before retrying.
+Keep the `replace` directive in `go.mod`; it points builds to the patched core.
