@@ -42,7 +42,7 @@ func mac(key []byte, s string) []byte {
 	return h.Sum(nil)
 }
 
-// Independent verification of AWS SDK signer output, including escaped paths.
+// Independently verify the manual SigV4 signature, including escaped paths.
 func verifySignature(t *testing.T, r *http.Request, body []byte) {
 	t.Helper()
 	auth := r.Header.Get("Authorization")
@@ -184,6 +184,52 @@ func TestS3InvalidConfiguration(t *testing.T) {
 		cfg := &Config{Service: "S3", RemoteFolder: "private/device1", Secrets: []string{string(raw)}}
 		if _, err := newS3Storage(nil, cfg); err == nil {
 			t.Fatal("unsafe endpoint accepted")
+		}
+	}
+}
+
+func TestS3RejectsInvalidBucketAndPrefix(t *testing.T) {
+	valid := s3Credentials{Endpoint: "https://example.com", Region: "ru-msk", Bucket: "test-bucket", AccessKey: "a", SecretKey: "b"}
+	for _, test := range []struct {
+		name   string
+		bucket string
+		prefix string
+	}{
+		{"invalid bucket", "Bucket", "private/device1"},
+		{"short bucket", "ab", "private/device1"},
+		{"empty prefix", valid.Bucket, ""},
+		{"traversing prefix", valid.Bucket, "private/../device1"},
+		{"dot prefix segment", valid.Bucket, "private/./device1"},
+		{"empty prefix segment", valid.Bucket, "private//device1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			credentials := valid
+			credentials.Bucket = test.bucket
+			raw, _ := json.Marshal(credentials)
+			config := &Config{Service: "S3", RemoteFolder: test.prefix, Secrets: []string{string(raw)}}
+			if _, err := newS3Storage(nil, config); err == nil {
+				t.Fatal("invalid bucket or prefix accepted")
+			}
+		})
+	}
+}
+
+func TestS3RejectsUnsafeNamesForAllOperations(t *testing.T) {
+	s, _ := testS3(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unsafe name reached S3")
+	})
+	for _, name := range []string{"", "../a", "/a", "a/../b", "a//b", "a\\b"} {
+		if err := s.Put(context.Background(), name, nil); err == nil {
+			t.Errorf("Put accepted unsafe name %q", name)
+		}
+		if _, err := s.Get(context.Background(), name); err == nil {
+			t.Errorf("Get accepted unsafe name %q", name)
+		}
+		if err := s.Delete(context.Background(), name); err == nil {
+			t.Errorf("Delete accepted unsafe name %q", name)
+		}
+		if _, err := s.List(context.Background(), name); err == nil {
+			t.Errorf("List accepted unsafe prefix %q", name)
 		}
 	}
 }

@@ -7,7 +7,6 @@ toolchain go1.26.1
 require (
 	github.com/adrg/xdg v0.5.3
 	github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22
-	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-chi/render v1.0.3
 	github.com/go-playground/validator/v10 v10.30.2
@@ -63,7 +62,6 @@ require (
 	github.com/aead/cmac v0.0.0-20160719120800-7af84192f0b1 // indirect
 	github.com/ajg/form v1.5.1 // indirect
 	github.com/andybalholm/brotli v1.0.6 // indirect
-	github.com/aws/smithy-go v1.22.2 // indirect
 	github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d // indirect
 	github.com/cenkalti/backoff/v4 v4.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
