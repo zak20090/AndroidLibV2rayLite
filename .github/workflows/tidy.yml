@@ -66,10 +66,12 @@ jobs:
             echo "Failed to detect Go version from upstream go.mod"
           fi
 
-          go get github.com/v2fly/v2ray-core/v5@${{ env.LATEST_TAG_NAME }}
+          bash scripts/update-v2ray-core.sh "$LATEST_TAG_NAME"
 
           # Clean up and verify module dependencies
           go mod tidy -v
+          go test ./...
+          (cd third_party/v2ray-core && go test ./infra/conf/v4 ./transport/internet/xdrive ./main/distro/all)
 
           # Show changes
           git diff
